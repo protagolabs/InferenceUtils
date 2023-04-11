@@ -1,4 +1,3 @@
-import json
 import os
 import shutil
 import signal
@@ -92,7 +91,6 @@ class Utils(object):
             self.redis_client.set_json_response_to_list(message_id, message_dict.get(message_id))
             self.redis_client.ack_message(message_id)
 
-
     def inform_ready(self):
         pass
 
@@ -102,6 +100,7 @@ class Utils(object):
             return False
         else:
             return True
+
 
 if __name__ == '__main__':
     utils = Utils()
