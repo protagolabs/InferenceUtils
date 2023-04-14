@@ -1,10 +1,9 @@
 import json
 import os
-import time
 
 import redis
 from redis.client import Redis
-from redis.sentinel import Sentinel, MasterNotFoundError, SentinelConnectionPool
+from redis.sentinel import Sentinel, MasterNotFoundError
 
 password = os.getenv("REDIS_PASSWORD", "8HHKMUuDeYVawngZGMq6")
 sentinel_password = os.getenv("SENTINEL_PASSWORD", "asdfwe90312b123412b12")
@@ -24,7 +23,7 @@ class RedisClient:
         sentinel = Sentinel(sentinel_servers, password=password, encoding="utf-8", sentinel_kwargs={"password": sentinel_password})
         self.client:Redis = sentinel.master_for(master_name, encoding="utf-8",decode_responses=True)
         try:
-            print(self.client.info())
+            self.client.info()
         except MasterNotFoundError as e:
             print("redis sentinel not found , try to connect local redis")
             self.client = redis.Redis(host="localhost", port=port, password=password)

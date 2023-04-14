@@ -10,7 +10,7 @@ from typing import List, Dict
 
 import boto3
 
-from redisClient import RedisClient
+from inferenceUtils.redisClient import RedisClient
 
 stream_name = os.getenv("STREAM_NAME", "DefaultStreamName")
 
