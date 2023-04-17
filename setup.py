@@ -34,7 +34,8 @@ setup(
         "setuptools==65.6.3",
         "six==1.16.0",
         "urllib3==1.26.14",
-        "wheel==0.38.4"
+        "wheel==0.38.4",
+        "requests==2.28.2"
     ],
     description="package for inference at net-mind platform"
 )

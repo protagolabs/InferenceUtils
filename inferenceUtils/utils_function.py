@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Dict
 
 import boto3
+import requests
 
 from inferenceUtils.redisClient import RedisClient
 
@@ -31,7 +32,10 @@ class Utils(object):
         self.should_stop = True
 
     def run(self, execute_fuc, interval=0):
-        print("iam ready")
+        res = requests.post(
+            f"a0401d1668ec948848b1e32ec2c95aee-64c10989f7fb4338.elb.us-east-1.amazonaws.com:8088/inform_ready",
+            json={"endpoint_id": stream_name})
+        print(res.json())
         while not self.should_stop:
             execute_fuc()
             time.sleep(interval)
@@ -61,6 +65,11 @@ class Utils(object):
         return tmpdir
 
     def get_input_parameters(self, batch=1) -> List[Dict[str, any]]:
+        """
+        :return:
+        return a list of input parameters-dict, include "id"(need to be set when response) and "body"(json input)
+        example [{"id": "24f2f0ba-5a8c-4625-be37-d7bf3fc46e09", "body": '{"text": "hello"}'}]
+        """
         max_retry_times = 10
         for i in range(max_retry_times):
             messages = self.redis_client.get_data_from_stream(count=batch)
