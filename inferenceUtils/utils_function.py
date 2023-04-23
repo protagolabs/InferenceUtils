@@ -17,6 +17,8 @@ stream_name = os.getenv("STREAM_NAME", "DefaultStreamName")
 
 model_bucket_name = os.getenv("MODEL_BUCKET_NAME", "netmind-inference-model-bucket")
 
+report_endpoint = os.getenv("REPORT_ENDPOINT", "http://localhost:8080/report")
+
 
 class Utils(object):
 
@@ -33,9 +35,8 @@ class Utils(object):
 
     def run(self, execute_fuc, interval=0):
         res = requests.post(
-            f"a0401d1668ec948848b1e32ec2c95aee-64c10989f7fb4338.elb.us-east-1.amazonaws.com:8088/inform_ready",
-            json={"endpoint_id": stream_name})
-        print(res.json())
+            f"{report_endpoint}/inform_ready", json={"endpoint_id": stream_name})
+        print(f"called inform_ready； now start to monitor stream:{stream_name}")
         while not self.should_stop:
             execute_fuc()
             time.sleep(interval)
@@ -106,6 +107,7 @@ class Utils(object):
     @staticmethod
     def _is_timeout(start_time, timeout=10):
         if time.time() - float(start_time) > timeout:
+            print("timeout over 10s")
             return False
         else:
             return True

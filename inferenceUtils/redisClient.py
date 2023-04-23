@@ -1,5 +1,6 @@
 import json
 import os
+import uuid
 
 import redis
 from redis.client import Redis
@@ -11,8 +12,7 @@ port = os.getenv("REDIS_PORT", 6379)
 stream_name = os.getenv("STREAM_NAME", "DefaultStreamName")
 
 group_name = "inference_group"
-consumer_name = os.getenv("POD_NAME", "DefaultConsumerName")
-
+consumer_name = os.getenv("HOSTNAME", f"consumer_name_{str(uuid.uuid4())[:10]}")
 
 class RedisClient:
     def __init__(self):
@@ -36,7 +36,7 @@ class RedisClient:
         print("redis client init finished....")
 
     def get_data_from_stream(self, count=1):
-        message = self.client.xreadgroup(group_name, "consumer_name", {stream_name: ">"}, block=0, count=count)
+        message = self.client.xreadgroup(group_name, consumer_name, {stream_name: ">"}, block=0, count=count)
         if message:
             return message
         else:
