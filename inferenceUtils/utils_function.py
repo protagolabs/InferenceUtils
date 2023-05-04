@@ -36,7 +36,7 @@ class Utils(object):
     def run(self, execute_fuc, interval=0):
         res = requests.post(
             f"{report_endpoint}/inform_ready", json={"endpoint_id": stream_name})
-        print(f"called inform_ready； now start to monitor stream:{stream_name}")
+        print(f"called inform_ready rep:{res.status_code}； now start to monitor stream:{stream_name}")
         while not self.should_stop:
             execute_fuc()
             time.sleep(interval)
