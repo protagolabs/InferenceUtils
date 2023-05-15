@@ -127,12 +127,19 @@ class Utils(object):
     def _send_message_to_sqs(self, message_body, message_id):
         message_id = message_id.split("__")[0]
         async_queue_url = f"https://sqs.us-east-1.amazonaws.com/134622832812/inference-message-async-{message_id}"
-        if isinstance(message_body, dict):
-            message_body = json.dumps(message_body)
+        if isinstance(message_body, str):
+            message_body = json.loads(message_body)
+        result_message = {
+            "response_body_json": message_body,
+            "request_id": message_id,
+            "request_body_json": "",
+            "description": "succeed"
+        }
+
         try:
             response = self.sqs_client.send_message(
                 QueueUrl=async_queue_url,
-                MessageBody=message_body
+                MessageBody=json.dumps(result_message)
             )
             print(f"already send message to sqs {response}")
             return response
