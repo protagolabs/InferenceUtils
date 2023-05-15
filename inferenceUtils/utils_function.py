@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import signal
@@ -6,10 +7,11 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Union
 
 import boto3
 import requests
+from botocore.exceptions import ClientError, BotoCoreError
 
 from inferenceUtils.redisClient import RedisClient
 
@@ -25,6 +27,8 @@ class Utils(object):
     def __init__(self):
         self.redis_client = RedisClient()
         self.s3_client = boto3.Session(region_name="us-west-2").client("s3")
+        self.sns_client = boto3.client("sns")
+        self.sqs_client = boto3.client('sqs', region_name='us-west-2')
         self.stream_name = stream_name
         self.should_stop = False
         signal.signal(signal.SIGTERM, self._sigterm_handler)
@@ -36,7 +40,8 @@ class Utils(object):
     def run(self, execute_fuc, interval=0):
         res = requests.post(
             f"{report_endpoint}/inform_ready", json={"endpoint_id": stream_name})
-        print(f"called inform_ready rep:{res.status_code}； now start to monitor stream:{stream_name}")
+        print(
+            f"called inform_ready rep:{res.status_code}； now start to monitor stream:{stream_name} with interval:{interval}")
         while not self.should_stop:
             execute_fuc()
             time.sleep(interval)
@@ -100,6 +105,39 @@ class Utils(object):
             message_id = next(iter(message_dict))
             self.redis_client.set_json_response_to_list(message_id, message_dict.get(message_id))
             self.redis_client.ack_message(message_id)
+
+    def record_response_async(self, message_with_id: List[Dict[str, Union[str, dict]]]):
+        for message_dict in message_with_id:
+            message_id = next(iter(message_dict))
+            self._send_message_to_sqs(message_dict.get(message_id), message_id)
+
+    def _send_message_to_sns(self, sns_topic, message: dict):
+        try:
+            message_json = json.dumps({"default": json.dumps(message)})
+            topic_arn = f"arn:aws:sns:us-west-2:134622832812:{sns_topic}"
+            response = self.sns_client.publish(
+                TopicArn=topic_arn, Message=message_json, MessageStructure="json"
+            )
+            print(f"Published message to {sns_topic}.")
+            return response["MessageId"]
+
+        except ClientError:
+            print(f"[Warning] Couldn't publish message to {sns_topic} with body {message}.")
+
+    def _send_message_to_sqs(self, message_body, message_id):
+        message_id = message_id.split("__")[0]
+        async_queue_url = f"https://sqs.us-east-1.amazonaws.com/134622832812/inference-message-async-{message_id}"
+        if isinstance(message_body, dict):
+            message_body = json.dumps(message_body)
+        try:
+            response = self.sqs_client.send_message(
+                QueueUrl=async_queue_url,
+                MessageBody=message_body
+            )
+            print(f"already send message to sqs {response}")
+            return response
+        except (BotoCoreError, ClientError) as e:
+            print(f"Error sending message to SQS: {str(e)}")
 
     def inform_ready(self):
         pass
