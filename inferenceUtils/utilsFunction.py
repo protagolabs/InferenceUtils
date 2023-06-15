@@ -1,3 +1,4 @@
+import functools
 import json
 import os
 import shutil
@@ -6,13 +7,16 @@ import tarfile
 import tempfile
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import List, Dict, Union
+from typing import List, Dict, Union, Callable, Optional
 
 import boto3
 import requests
 from botocore.exceptions import ClientError, BotoCoreError
 
+from inferenceUtils.fileDownloader import FileDownloadConfig, FileDownloader
+from inferenceUtils.logSetting import logger
 from inferenceUtils.redisClient import RedisClient
 
 stream_name = os.getenv("STREAM_NAME", "DefaultStreamName")
@@ -20,6 +24,10 @@ stream_name = os.getenv("STREAM_NAME", "DefaultStreamName")
 model_bucket_name = os.getenv("MODEL_BUCKET_NAME", "netmind-inference-model-bucket")
 
 report_endpoint = os.getenv("REPORT_ENDPOINT", "http://localhost:8080/report")
+
+HOME_DIR = os.path.expanduser("~")
+DEFAULT_CACHE_DIR = os.getenv("DEFAULT_CACHE_DIR", os.path.join(HOME_DIR, ".cache/netmind/models"))
+env = os.getenv("ENV", "dev").lower()
 
 
 class Utils(object):
@@ -32,14 +40,16 @@ class Utils(object):
         self.stream_name = stream_name
         self.should_stop = False
         signal.signal(signal.SIGTERM, self._sigterm_handler)
+        self.executor = ThreadPoolExecutor(max_workers=10)
 
     def _sigterm_handler(self, signum, frame):
         print("Received SIGTERM signal, shutting down gracefully...")
         self.should_stop = True
 
     def run(self, execute_fuc, interval=0):
+        assert isinstance(execute_fuc, Callable), "execute_fuc must be a function or lambda"
         res = requests.post(
-            f"{report_endpoint}/inform_ready", json={"endpoint_id": stream_name})
+            f"{report_endpoint}/inform_ready", json={"fetch_stream_name": stream_name})
         print(
             f"called inform_ready rep:{res.status_code}； now start to monitor stream:{stream_name} with interval:{interval}")
         while not self.should_stop:
@@ -54,6 +64,10 @@ class Utils(object):
         file_path = os.path.join(tmpdir, object_key.split('/')[-1])
         s3.download_file(model_bucket_name, object_key, file_path)
 
+        self.extract_file(file_path, tmpdir)
+        return tmpdir
+
+    def extract_file(self, file_path, tmpdir):
         if file_path.endswith('.zip'):
             with zipfile.ZipFile(file_path, 'r') as zip_ref:
                 zip_ref.extractall(tmpdir)
@@ -68,15 +82,36 @@ class Utils(object):
             print("has sub folder")
             for sub_item in dir_list[0].iterdir():
                 shutil.move(str(sub_item), str(folder))
-        return tmpdir
 
-    def get_input_parameters(self, batch=1) -> List[Dict[str, any]]:
+    def download_file_chunk(self, bucket_name, object_key, start_byte, end_byte, output_filename):
+        range_header = f'bytes={start_byte}-{end_byte}'
+        response = self.s3_client.get_object(Bucket=bucket_name, Key=object_key, Range=range_header)
+
+        with open(output_filename, 'wb') as f:
+            for chunk in response['Body'].iter_chunks():
+                f.write(chunk)
+
+    def concurrent_download(self, object_key, num_proc=1, merge_block_size=1024 * 64):
+
+        config = FileDownloadConfig(
+            cache_dir=DEFAULT_CACHE_DIR,
+            timeout=600,
+            num_proc=num_proc,
+            merge_block=merge_block_size
+        )
+        downloader = FileDownloader(config)
+        file_path = downloader.download_to_temp_file(bucket=model_bucket_name, key=object_key)
+        extract_path = downloader.extract_archive(file_path)
+        return extract_path
+
+    def get_input_parameters(self, batch=1, is_first_model=True, json_decode=False) -> List[Dict[str, any]]:
         """
         :return:
         return a list of input parameters-dict, include "id"(need to be set when response) and "body"(json input)
         example [{"id": "24f2f0ba-5a8c-4625-be37-d7bf3fc46e09", "body": '{"text": "hello"}'}]
         """
         max_retry_times = 10
+        start_time = time.time()
         for i in range(max_retry_times):
             messages = self.redis_client.get_data_from_stream(count=batch)
             input_list = []
@@ -84,32 +119,71 @@ class Utils(object):
                 # messages = [[streamName, [(message_id, {message_body}))}]]]
                 for message in messages[0][1]:
                     input_dict = message[1]
-                    input_dict.update({"id": message[0]})
-                    if self._is_timeout(input_dict.pop("recordTime")):
-                        input_list.append(input_dict)
+                    if is_first_model:  # only set stream id into body for first endpoint-model
+                        input_dict.update({"id": message[0]})
+                    if self._is_fresh(input_dict.pop("recordTime")):
+                        if json_decode:
+                            input_dict["body"] = json.loads(input_dict["body"])
+                            for key, value in input_dict["body"].items():
+                                if value.startswith("http"):
+                                    content = self.download_file(value)
+                                    input_dict["body"][key] = content
+                        else:
+                            input_list.append(input_dict)
                 if not input_list:
                     continue
-                print("get input", input_list)
+                print("get input", input_list, "time used=", time.time() - start_time)
                 return input_list
             except IndexError as e:
                 print("exception happened when get input", e)
                 return []
 
-    # def report_response(self, message_id_list: List[str], **kwargs):
-    #     for message_id in message_id_list:
-    #         self.redis_client.set_response_to_list(message_id, **kwargs)
-    #     self.redis_client.ack_message(message_id_list)
+    def download_file(self, url) -> Optional[bytes]:
+        response = requests.get(url)
+        if 300 > response.status_code >= 200:
+            content_type = response.headers['content-type']
+            if 'image' in content_type or 'audio' in content_type:
+                file_data = response.content
+                return file_data
+            else:
+                logger.error("try to download image or audio file, but the content-type is %s", content_type)
+                return None
+        else:
+            logger.error("download file error, status_code: %s", response.status_code)
+            return None
 
-    def report_response(self, message_with_id: List[Dict[str, str]]):
+    # set message back to redis stream
+    def set_task_back(self, message_with_id: List[Dict[str, str]], next_id):
         for message_dict in message_with_id:
             message_id = next(iter(message_dict))
-            self.redis_client.set_json_response_to_list(message_id, message_dict.get(message_id))
-            self.redis_client.ack_message(message_id)
+            self.redis_client.set_message_to_next_stream(next_id, message_dict.get(message_id))
 
-    def record_response_async(self, message_with_id: List[Dict[str, Union[str, dict]]]):
-        for message_dict in message_with_id:
-            message_id = next(iter(message_dict))
-            self._send_message_to_sqs(message_dict.get(message_id), message_id)
+    def report_response(self, message_with_id: List[Dict[str, str]], use_muti_thread=False):
+
+        def response_and_ack():
+            for message_dict in message_with_id:
+                message_id = next(iter(message_dict))
+                self.redis_client.set_json_response_to_list(message_id, message_dict.get(message_id))
+                self.redis_client.ack_message(message_id)
+
+        partial_inner_closure = functools.partial(response_and_ack)
+        if use_muti_thread:
+            self.executor.submit(partial_inner_closure)
+        else:
+            response_and_ack()
+
+    def record_response_async(self, message_with_id: List[Dict[str, Union[str, dict]]], use_muti_thread=False):
+
+        def send_message_to_sns():
+            for message_dict in message_with_id:
+                message_id = next(iter(message_dict))
+                self._send_message_to_sqs(message_id, message_dict.get(message_id))
+
+        partial_inner_closure = functools.partial(send_message_to_sns)
+        if use_muti_thread:
+            self.executor.submit(partial_inner_closure)
+        else:
+            send_message_to_sns()
 
     def _send_message_to_sns(self, sns_topic, message: dict):
         try:
@@ -124,9 +198,10 @@ class Utils(object):
         except ClientError:
             print(f"[Warning] Couldn't publish message to {sns_topic} with body {message}.")
 
-    def _send_message_to_sqs(self, message_body, message_id):
+    def _send_message_to_sqs(self, message_id, message_body):
         message_id = message_id.split("__")[0]
-        async_queue_url = f"https://sqs.us-east-1.amazonaws.com/134622832812/inference-message-async-{message_id}"
+        endpoint_unique_id = stream_name.split("__")[0]
+        async_queue_url = f"https://sqs.us-east-1.amazonaws.com/134622832812/inference-message-async-{env}-{endpoint_unique_id}"
         if isinstance(message_body, str):
             message_body = json.loads(message_body)
         result_message = {
@@ -150,7 +225,7 @@ class Utils(object):
         pass
 
     @staticmethod
-    def _is_timeout(start_time, timeout=10):
+    def _is_fresh(start_time, timeout=10):
         if time.time() - float(start_time) > timeout:
             print("timeout over 10s")
             return False
@@ -161,3 +236,7 @@ class Utils(object):
 if __name__ == '__main__':
     utils = Utils()
     print(utils.get_input_parameters())
+
+    for each_client in clients:
+        if each_client.get_he_or_she_wants():
+            host.satisfaction += 1

@@ -1,3 +1,3 @@
-from inferenceUtils.utils_function import Utils
+from inferenceUtils.utilsFunction import Utils
 
 __version__ = "0.0.2"
