@@ -92,22 +92,36 @@ class Utils(object):
                 f.write(chunk)
 
     def concurrent_download(self, object_key, num_proc=1, merge_block_size=1024 * 64):
-
-        config = FileDownloadConfig(
-            cache_dir=DEFAULT_CACHE_DIR,
-            timeout=600,
-            num_proc=num_proc,
-            merge_block=merge_block_size
-        )
-        downloader = FileDownloader(config)
-        file_path = downloader.download_to_temp_file(bucket=model_bucket_name, key=object_key)
-        extract_path = downloader.extract_archive(file_path)
+        exist, extract_path = self.check_file_exist(object_key)
+        print("debug floder exist:", exist, "extracted_path:", extract_path)
+        if not exist:
+            config = FileDownloadConfig(
+                cache_dir=DEFAULT_CACHE_DIR,
+                timeout=600,
+                num_proc=num_proc,
+                merge_block=merge_block_size
+            )
+            downloader = FileDownloader(config)
+            file_path = downloader.download_to_temp_file(bucket=model_bucket_name, key=object_key)
+            extract_path = downloader.extract_archive(file_path)
         return extract_path
+
+    def check_file_exist(self, object_key):
+        file_name_without_ext, ext = os.path.splitext(object_key)
+        folder = os.path.join(DEFAULT_CACHE_DIR, file_name_without_ext)
+        if os.path.exists(os.path.join(folder, "flag.conf")) and os.path.isdir(folder):
+            return True, folder
 
     def get_input_parameters(self, batch=1, is_first_model=True, json_decode=False) -> List[Dict[str, any]]:
         """
+        :param
+            batch: fetch max batch size from stream
+            is_first_model: set message_id into input dict if true, so that it can be used to response
+                            set it to false if the model is not the first model in the pipeline
+            json_decode: decode body from json to dict; required if url is passed in json body, so that utils can download
+
         :return:
-        return a list of input parameters-dict, include "id"(need to be set when response) and "body"(json input)
+        return a list of input parameters-dict, include "id"(need to be set when response) and "body"(json input/ dict)
         example [{"id": "24f2f0ba-5a8c-4625-be37-d7bf3fc46e09", "body": '{"text": "hello"}'}]
         """
         max_retry_times = 10
@@ -119,7 +133,10 @@ class Utils(object):
                 # messages = [[streamName, [(message_id, {message_body}))}]]]
                 for message in messages[0][1]:
                     input_dict = message[1]
-                    if is_first_model:  # only set stream id into body for first endpoint-model
+                    if is_first_model and "id" in input_dict.keys():
+                        logger.warning("input dict already has id, which means it may not be the first model in "
+                                       "pipeline we will ignore is_first_model parameters ")
+                    if is_first_model and "id" not in input_dict.keys():
                         input_dict.update({"id": message[0]})
                     if self._is_fresh(input_dict.pop("recordTime")):
                         if json_decode:
@@ -130,6 +147,7 @@ class Utils(object):
                                     input_dict["body"][key] = content
                         else:
                             input_list.append(input_dict)
+
                 if not input_list:
                     continue
                 print("get input", input_list, "time used=", time.time() - start_time)
@@ -156,7 +174,7 @@ class Utils(object):
     def set_task_back(self, message_with_id: List[Dict[str, str]], next_id):
         for message_dict in message_with_id:
             message_id = next(iter(message_dict))
-            self.redis_client.set_message_to_next_stream(next_id, message_dict.get(message_id))
+            self.redis_client.set_message_to_next_stream(next_id, message_id, message_dict.get(message_id))
 
     def report_response(self, message_with_id: List[Dict[str, str]], use_muti_thread=False):
 

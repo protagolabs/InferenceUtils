@@ -34,11 +34,6 @@ class FileDownloadConfig(object):
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir, exist_ok=True)
 
-        # if bucket and key:
-        #     response = self.s3_client.head_object(Bucket=model_bucket_name, Key=object_key)
-        #     content_length = int(response['ContentLength'])
-        #     chunk_size = content_length // num_proc
-
 
 class FileDownloader(object):
 
@@ -55,7 +50,7 @@ class FileDownloader(object):
         s3 = boto3.client('s3')
         response = s3.head_object(Bucket=model_bucket_name, Key=object_key)
         content_length = int(response['ContentLength'])
-        block_size, file_path = self.prepare_progress(content_length, object_key)
+        block_size, file_path = self.prepare_progress(content_length, "", object_key)
         return block_size, content_length, file_path
 
     def download_to_temp_file(self, presigned_url=None, bucket=None, key=None):
@@ -114,31 +109,38 @@ class FileDownloader(object):
 
     def _exrtact_common_folder(self, extracted_folder, file_path):
         if os.path.exists(extracted_folder) and os.path.isdir(extracted_folder):
-            print("do extracted_folder")
+            logger.info("do extracted_folder")
             for file_name in os.listdir(extracted_folder):
                 os.rename(os.path.join(extracted_folder, file_name),
                           os.path.join(os.path.dirname(file_path), file_name))
             os.rmdir(extracted_folder)
 
     def _info_prepare(self, presigned_url, response):
-        filenames = re.findall("https://.*?\.amazonaws\.com/(.*?\..*?)\?", presigned_url)
+        filenames = re.findall("https://.*?\.amazonaws\.com/((?:[\w-]+/)*)([\w-]+\.\w+(?:\.\w+)?)", presigned_url)
         # give default name with content type if no filename can be extract in url
         content_length = int(response.headers.get('content-length', 0))
-        filename = f"downloaded_file.{response.headers.get('Content-Type', '').split('/')[-1]}" \
-            if not filenames else filenames[0]
-        block_size, file_path = self.prepare_progress(content_length, filename)
+        if filenames and len(filenames[0]) > 1:
+            filename = filenames[0][1]
+            common_path = filenames[0][0]
+        else:
+            content_type = response.headers.get('Content-Type', '').split('/')[-1]
+            if content_type not in ["zip", "tar", "gz", "bz2"]:
+                content_type = "zip"
+            filename = f"downloaded_file.{content_type}"
+            common_path = "common_user_id"
+        block_size, file_path = self.prepare_progress(content_length, common_path, filename)
         return block_size, content_length, file_path
 
-    def prepare_progress(self, content_length, filename):
+    def prepare_progress(self, content_length, user_id, filename):
         file_name_without_ext, ext = os.path.splitext(filename)
-        folder_path = os.path.join(self.download_config.cache_dir, file_name_without_ext)
+        folder_path = os.path.join(self.download_config.cache_dir, user_id, file_name_without_ext)
         try:
-            os.mkdir(folder_path)
+            os.makedirs(folder_path)
         except FileExistsError:
             logger.warning("folder already exists but without success flag, will overwrite it")
             shutil.rmtree(folder_path)
-            os.mkdir(folder_path)
-        file_path = os.path.join(self.download_config.cache_dir, file_name_without_ext, filename)
+            os.makedirs(folder_path)
+        file_path = os.path.join(self.download_config.cache_dir, user_id, file_name_without_ext, filename)
         # last block may be bigger than block_size , set last block end number to content_length
         block_size = content_length // self.download_config.num_proc
         return block_size, file_path
