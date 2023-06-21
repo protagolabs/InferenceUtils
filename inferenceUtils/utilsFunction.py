@@ -128,9 +128,10 @@ class Utils(object):
         example [{"id": "24f2f0ba-5a8c-4625-be37-d7bf3fc46e09", "body": '{"text": "hello"}'}]
         """
         max_retry_times = 10
-        start_time = time.time()
+
         for i in range(max_retry_times):
             messages = self.redis_client.get_data_from_stream(count=batch)
+            start_time = time.time()
             input_list = []
             try:
                 # messages = [[streamName, [(message_id, {message_body}))}]]]
@@ -147,7 +148,7 @@ class Utils(object):
                         input_list.append(input_dict)
                 if not input_list:
                     continue
-                print("get input", input_list, "time used=", time.time() - start_time)
+                print("get input", input_list, "prepare time used=", time.time() - start_time)
                 return input_list
             except IndexError as e:
                 logger.error(f"exception happened when get input :{e}")
