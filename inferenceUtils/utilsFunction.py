@@ -35,7 +35,7 @@ class Utils(object):
     def __init__(self):
         self.redis_client = RedisClient()
         self.s3_client = boto3.Session(region_name="us-west-2").client("s3")
-        self.sns_client = boto3.client("sns")
+        # self.sns_client = boto3.client("sns")
         self.sqs_client = boto3.client('sqs', region_name='us-west-2')
         self.stream_name = stream_name
         self.should_stop = False
@@ -43,20 +43,20 @@ class Utils(object):
         self.executor = ThreadPoolExecutor(max_workers=10)
 
     def _sigterm_handler(self, signum, frame):
-        print("Received SIGTERM signal, shutting down gracefully...")
+        logger.info("Received SIGTERM signal, shutting down gracefully...")
         self.should_stop = True
 
     def run(self, execute_fuc, interval=0):
         assert isinstance(execute_fuc, Callable), "execute_fuc must be a function or lambda"
         res = requests.post(
-            f"{report_endpoint}/inform_ready", json={"fetch_stream_name": stream_name})
-        print(
-            f"called inform_ready rep:{res.status_code}； now start to monitor stream:{stream_name} with interval:{interval}")
+            f"{report_endpoint}/inform_ready", json={"stream_name": stream_name})
+        logger.info(f"called inform_ready rep:{res.status_code}；"
+                    f" now start to monitor stream:{stream_name} with interval:{interval}")
         while not self.should_stop:
             execute_fuc()
             time.sleep(interval)
         self.redis_client.close()
-        print("worker pod gracefully stopped.")
+        logger.info("worker pod gracefully stopped.")
 
     def download_and_extract(self, object_key: str) -> str:
         s3 = boto3.client('s3')
@@ -93,7 +93,7 @@ class Utils(object):
 
     def concurrent_download(self, object_key, num_proc=1, merge_block_size=1024 * 64):
         exist, extract_path = self.check_file_exist(object_key)
-        print("debug floder exist:", exist, "extracted_path:", extract_path)
+        print("debug folder exist:", exist, "extracted_path:", extract_path)
         if not exist:
             config = FileDownloadConfig(
                 cache_dir=DEFAULT_CACHE_DIR,
@@ -111,14 +111,17 @@ class Utils(object):
         folder = os.path.join(DEFAULT_CACHE_DIR, file_name_without_ext)
         if os.path.exists(os.path.join(folder, "flag.conf")) and os.path.isdir(folder):
             return True, folder
+        else:
+            return False, ""
 
     def get_input_parameters(self, batch=1, is_first_model=True, json_decode=False) -> List[Dict[str, any]]:
         """
-        :param
+        param:
             batch: fetch max batch size from stream
             is_first_model: set message_id into input dict if true, so that it can be used to response
                             set it to false if the model is not the first model in the pipeline
-            json_decode: decode body from json to dict; required if url is passed in json body, so that utils can download
+            json_decode: decode body from json to dict; required if url is passed in json body,
+                        so that utils can download
 
         :return:
         return a list of input parameters-dict, include "id"(need to be set when response) and "body"(json input/ dict)
@@ -140,21 +143,23 @@ class Utils(object):
                         input_dict.update({"id": message[0]})
                     if self._is_fresh(input_dict.pop("recordTime")):
                         if json_decode:
-                            input_dict["body"] = json.loads(input_dict["body"])
-                            for key, value in input_dict["body"].items():
-                                if value.startswith("http"):
-                                    content = self.download_file(value)
-                                    input_dict["body"][key] = content
-                        else:
-                            input_list.append(input_dict)
-
+                            input_dict = self.message_decode(input_dict)
+                        input_list.append(input_dict)
                 if not input_list:
                     continue
                 print("get input", input_list, "time used=", time.time() - start_time)
                 return input_list
             except IndexError as e:
-                print("exception happened when get input", e)
+                logger.error(f"exception happened when get input :{e}")
                 return []
+
+    def message_decode(self, input_dict):
+        input_dict["body"] = json.loads(input_dict["body"])
+        for key, value in input_dict["body"].items():
+            if value.startswith("http"):
+                content = self.download_file(value)
+                input_dict["body"][key] = content
+        return input_dict
 
     def download_file(self, url) -> Optional[bytes]:
         response = requests.get(url)
@@ -203,23 +208,24 @@ class Utils(object):
         else:
             send_message_to_sns()
 
-    def _send_message_to_sns(self, sns_topic, message: dict):
-        try:
-            message_json = json.dumps({"default": json.dumps(message)})
-            topic_arn = f"arn:aws:sns:us-west-2:134622832812:{sns_topic}"
-            response = self.sns_client.publish(
-                TopicArn=topic_arn, Message=message_json, MessageStructure="json"
-            )
-            print(f"Published message to {sns_topic}.")
-            return response["MessageId"]
-
-        except ClientError:
-            print(f"[Warning] Couldn't publish message to {sns_topic} with body {message}.")
+    # def _send_message_to_sns(self, sns_topic, message: dict):
+    #     try:
+    #         message_json = json.dumps({"default": json.dumps(message)})
+    #         topic_arn = f"arn:aws:sns:us-west-2:134622832812:{sns_topic}"
+    #         response = self.sns_client.publish(
+    #             TopicArn=topic_arn, Message=message_json, MessageStructure="json"
+    #         )
+    #         print(f"Published message to {sns_topic}.")
+    #         return response["MessageId"]
+    #
+    #     except ClientError:
+    #         print(f"[Warning] Couldn't publish message to {sns_topic} with body {message}.")
 
     def _send_message_to_sqs(self, message_id, message_body):
         message_id = message_id.split("__")[0]
         endpoint_unique_id = stream_name.split("__")[0]
-        async_queue_url = f"https://sqs.us-east-1.amazonaws.com/134622832812/inference-message-async-{env}-{endpoint_unique_id}"
+        async_queue_url = f"https://sqs.us-east-1.amazonaws.com/134622832812/inference-message-async-{env}" \
+                          f"-{endpoint_unique_id}"
         if isinstance(message_body, str):
             message_body = json.loads(message_body)
         result_message = {
@@ -234,10 +240,10 @@ class Utils(object):
                 QueueUrl=async_queue_url,
                 MessageBody=json.dumps(result_message)
             )
-            print(f"already send message to sqs {response}")
+            logger.info(f"already send message to sqs {response}")
             return response
         except (BotoCoreError, ClientError) as e:
-            print(f"Error sending message to SQS: {str(e)}")
+            logger.error(f"Error sending message to SQS: {str(e)}")
 
     def inform_ready(self):
         pass
@@ -245,7 +251,7 @@ class Utils(object):
     @staticmethod
     def _is_fresh(start_time, timeout=10):
         if time.time() - float(start_time) > timeout:
-            print("timeout over 10s")
+            logger.warning(" message timeout over 10s")
             return False
         else:
             return True
@@ -254,7 +260,3 @@ class Utils(object):
 if __name__ == '__main__':
     utils = Utils()
     print(utils.get_input_parameters())
-
-    for each_client in clients:
-        if each_client.get_he_or_she_wants():
-            host.satisfaction += 1

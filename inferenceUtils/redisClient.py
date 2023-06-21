@@ -14,17 +14,19 @@ fetch_stream_name = os.getenv("STREAM_NAME", "DefaultStreamName")
 group_name = "inference_group"
 consumer_name = os.getenv("HOSTNAME", f"consumer_name_{str(uuid.uuid4())[:10]}")
 
+
 class RedisClient:
     def __init__(self):
         sentinel_servers = [("44.215.65.249", 26379),
                             ("34.230.174.26", 26379),
                             ("34.230.174.26", 26379)]
         master_name = "mymaster"
-        sentinel = Sentinel(sentinel_servers, password=password, encoding="utf-8", sentinel_kwargs={"password": sentinel_password})
-        self.client:Redis = sentinel.master_for(master_name, encoding="utf-8",decode_responses=True)
+        sentinel = Sentinel(sentinel_servers, password=password, encoding="utf-8",
+                            sentinel_kwargs={"password": sentinel_password})
+        self.client: Redis = sentinel.master_for(master_name, encoding="utf-8", decode_responses=True)
         try:
             self.client.info()
-        except MasterNotFoundError as e:
+        except MasterNotFoundError:
             print("redis sentinel not found , try to connect local redis")
             self.client = redis.Redis(host="localhost", port=port, password=password)
         try:
@@ -42,12 +44,12 @@ class RedisClient:
         else:
             print("error: get blank message")
 
-    def set_message_to_next_stream(self, endpoint_model_id, message_body):
+    def set_message_to_next_stream(self, message_id, endpoint_model_id, message_body):
         # result = re.findall(r".*?__.*?__(\d*?)__.*?Class", fetch_stream_name)
         content_list = fetch_stream_name.split("__")
         stream_name = "__".join(content_list[:2] + endpoint_model_id + content_list[3:])
 
-        self.client.xadd(stream_name, message_body)
+        self.client.xadd(stream_name, {"id": message_id, "body": message_body})
 
     def ack_message(self, message_id):
         self.client.xack(fetch_stream_name, group_name, message_id)
@@ -74,4 +76,3 @@ class RedisClient:
     def close(self):
         self.client.close()
         print("success to close redis client")
-
